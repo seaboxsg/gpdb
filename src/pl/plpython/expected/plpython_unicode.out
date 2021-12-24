@@ -36,11 +36,11 @@ SELECT unicode_return();
 (1 row)
 
 INSERT INTO unicode_test (testvalue) VALUES ('test');
+ERROR:  Modifying distributed key in a BEFORE FOR EACH ROW trigger is not supported
 SELECT * FROM unicode_test;
  testvalue 
 -----------
-  
-(1 row)
+(0 rows)
 
 SELECT unicode_plan1();
  unicode_plan1 

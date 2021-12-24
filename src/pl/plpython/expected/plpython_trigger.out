@@ -534,19 +534,19 @@ CREATE TABLE b(data int); -- different type conversion
 CREATE TRIGGER a_t BEFORE INSERT ON a FOR EACH ROW EXECUTE PROCEDURE trig1234();
 CREATE TRIGGER b_t BEFORE INSERT ON b FOR EACH ROW EXECUTE PROCEDURE trig1234();
 INSERT INTO a DEFAULT VALUES;
+ERROR:  Modifying distributed key in a BEFORE FOR EACH ROW trigger is not supported
 SELECT * FROM a;
  data 
 ------
- 1234
-(1 row)
+(0 rows)
 
 DROP TABLE a;
 INSERT INTO b DEFAULT VALUES;
+ERROR:  Modifying distributed key in a BEFORE FOR EACH ROW trigger is not supported
 SELECT * FROM b;
  data 
 ------
- 1234
-(1 row)
+(0 rows)
 
 -- check that SQL run in trigger code can see transition tables
 CREATE TABLE transition_table_test (id int, name text);

@@ -84,7 +84,12 @@ static ResultRelInfo *getTargetResultRelInfo(ModifyTableState *node);
 static void ExecSetupChildParentMapForSubplan(ModifyTableState *mtstate);
 static TupleConversionMap *tupconv_map_for_subplan(ModifyTableState *node,
 												   int whichplan);
-
+static void GetDistributedKeyValues(Relation rel,
+									TupleTableSlot *slot,
+									Datum *values,
+									bool *isnulls,
+									int16 *typlens,
+									bool *typbyvals);
 /*
  * Verify that the tuples to be produced by INSERT or UPDATE match the
  * target relation's rowtype
@@ -407,8 +412,92 @@ ExecInsert(ModifyTableState *mtstate,
 		resultRelInfo->ri_TrigDesc->trig_insert_before_row &&
 		!splitUpdate)
 	{
+		int16		nkeys;
+		Datum	   *values;
+		int16	   *coltyplen;
+		bool	   *isnull;
+		bool	   *coltypbyval;
+		bool		check = false;
+
+		/*
+		 * If is distributed relation, get distributed keys value for latter
+		 * check if distributed keys were modified by the trigger, if modified, give
+		 * an error.
+		 * We only neek check in EXECUTE role.
+		 */
+		if (Gp_role == GP_ROLE_EXECUTE &&
+			POLICYTYPE_PARTITIONED == resultRelationDesc->rd_cdbpolicy->ptype)
+		{
+			nkeys = resultRelationDesc->rd_cdbpolicy->nattrs;
+			values = (Datum *) palloc(nkeys * sizeof(Datum));
+			coltyplen = (int16 *) palloc(nkeys * sizeof(int16));
+			isnull = (bool *) palloc(nkeys * sizeof(bool));
+			coltypbyval = (bool *) palloc(nkeys * sizeof(bool));
+
+			GetDistributedKeyValues(resultRelationDesc,
+									slot,
+									values,
+									isnull,
+									coltyplen,
+									coltypbyval);
+			check = true;
+		}
+
 		if (!ExecBRInsertTriggers(estate, resultRelInfo, slot))
+		{
+			if (check)
+			{
+				pfree(values);
+				pfree(coltyplen);
+				pfree(isnull);
+				pfree(coltypbyval);
+			}
 			return NULL;		/* "do nothing" */
+		}
+
+		if (check)
+		{
+			/*
+			 * We do not have to define new_nkeys, new_coltyplen and new_coltypbyval,
+			 * since trigger invocation can guarantee that the row structure(columns
+			 * number and columns type) keep consistent.
+			 */
+			Datum  *new_values;
+			bool   *new_isnull;
+			int		i;
+
+			new_values = (Datum *) palloc(nkeys * sizeof(Datum));
+			new_isnull = (bool *) palloc(nkeys * sizeof(bool));
+			GetDistributedKeyValues(resultRelationDesc,
+									slot,
+									new_values,
+									new_isnull,
+									coltyplen,
+									coltypbyval);
+
+			for (i = 0; i < nkeys; ++i)
+			{
+				if (isnull[i] && new_isnull[i])
+				{
+					continue;
+				}
+
+				if ((isnull[i] || new_isnull[i]) ||
+					!datum_image_eq(values[i], new_values[i], coltypbyval[i], coltyplen[i]))
+				{
+					ereport(ERROR,
+							(errcode(ERRCODE_GP_FEATURE_NOT_YET),
+							 errmsg("Modifying distributed key in a BEFORE FOR EACH ROW trigger is not supported")));
+				}
+			}
+
+			pfree(values);
+			pfree(coltyplen);
+			pfree(isnull);
+			pfree(coltypbyval);
+			pfree(new_values);
+			pfree(new_isnull);
+		}
 	}
 
 	/* INSTEAD OF ROW INSERT Triggers */
@@ -1221,9 +1310,92 @@ ExecUpdate(ModifyTableState *mtstate,
 	if (resultRelInfo->ri_TrigDesc &&
 		resultRelInfo->ri_TrigDesc->trig_update_before_row)
 	{
+		int16		nkeys;
+		Datum	   *values;
+		int16	   *coltyplen;
+		bool	   *isnull;
+		bool	   *coltypbyval;
+		bool		check = false;
+
+		/*
+		 * If distributed relation, fetch distributed key values, for latter
+		 * check if distributed-keys was modified by the trigger, if did, give
+		 * an error, we only do check in .
+		 */
+		if (Gp_role == GP_ROLE_EXECUTE &&
+			POLICYTYPE_PARTITIONED == resultRelationDesc->rd_cdbpolicy->ptype)
+		{
+			nkeys = resultRelationDesc->rd_cdbpolicy->nattrs;
+			values = (Datum *) palloc(nkeys * sizeof(Datum));
+			coltyplen = (int16 *) palloc(nkeys * sizeof(int16));
+			isnull = (bool *) palloc(nkeys * sizeof(bool));
+			coltypbyval = (bool *) palloc(nkeys * sizeof(bool));
+
+			GetDistributedKeyValues(resultRelationDesc,
+									slot,
+									values,
+									isnull,
+									coltyplen,
+									coltypbyval);
+			check = true;
+		}
+
 		if (!ExecBRUpdateTriggers(estate, epqstate, resultRelInfo,
 								  tupleid, oldtuple, slot))
+		{
+			if (check)
+			{
+				pfree(values);
+				pfree(coltyplen);
+				pfree(isnull);
+				pfree(coltypbyval);
+			}
 			return NULL;		/* "do nothing" */
+		}
+
+		if (check)
+		{
+			/*
+			 * We do not have to define new_nkeys, new_coltyplen and new_coltypbyval,
+			 * since trigger invocation can guarantee that the row structure(columns
+			 * number and columns type) keep consistent.
+			 */
+			Datum  *new_values;
+			bool   *new_isnull;
+			int		i;
+
+			new_values = (Datum *) palloc(nkeys * sizeof(Datum));
+			new_isnull = (bool *) palloc(nkeys * sizeof(bool));
+			GetDistributedKeyValues(resultRelationDesc,
+									slot,
+									new_values,
+									new_isnull,
+									coltyplen,
+									coltypbyval);
+
+			for (i = 0; i < nkeys; ++i)
+			{
+				if (isnull[i] && new_isnull[i])
+				{
+					continue;
+				}
+
+				if ((isnull[i] || new_isnull[i]) ||
+					!datum_image_eq(values[i], new_values[i], coltypbyval[i], coltyplen[i]))
+				{
+					ereport(ERROR,
+							(errcode(ERRCODE_GP_FEATURE_NOT_YET),
+							 errmsg("Modifying distributed key in a BEFORE FOR EACH ROW trigger is not supported")));
+				}
+			}
+
+			pfree(values);
+			pfree(coltyplen);
+			pfree(isnull);
+			pfree(coltypbyval);
+			pfree(new_values);
+			pfree(new_isnull);
+		}
 	}
 
 	/* INSTEAD OF ROW UPDATE Triggers */
@@ -2256,6 +2428,40 @@ tupconv_map_for_subplan(ModifyTableState *mtstate, int whichplan)
 
 	Assert(whichplan >= 0 && whichplan < mtstate->mt_nplans);
 	return mtstate->mt_per_subplan_tupconv_maps[whichplan];
+}
+
+/*
+ * Get distributed key values.
+ */
+static void
+GetDistributedKeyValues(Relation rel,
+						TupleTableSlot *slot,
+						Datum *values,
+						bool *isnulls,
+						int16 *typlens,
+						bool *typbyvals)
+{
+	TupleDesc	tupdesc = rel->rd_att;
+
+	Datum		value;
+	bool		isnull;
+	int			i, nattr;
+
+	for (i = 0; i < rel->rd_cdbpolicy->nattrs; ++i)
+	{
+		Form_pg_attribute att;
+
+		nattr = rel->rd_cdbpolicy->attrs[i];
+		value = slot_getattr(slot, nattr, &isnull);
+		att = TupleDescAttr(tupdesc, nattr - 1);
+		isnulls[i] = isnull;
+		typlens[i] = att->attlen;
+		typbyvals[i] = att->attbyval;
+		if (!isnull)
+			values[i] = datumCopy(value, att->attbyval, att->attlen);
+		else
+			values[i] = (Datum)0;
+	}
 }
 
 /* ----------------------------------------------------------------
